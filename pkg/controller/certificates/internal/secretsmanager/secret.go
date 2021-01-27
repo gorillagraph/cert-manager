@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -91,6 +92,12 @@ func (s *SecretsManager) UpdateData(ctx context.Context, crt *cmapi.Certificate,
 			},
 			Type: corev1.SecretTypeTLS,
 		}
+	} else {
+		// backup the existing secret
+		err = s.backupSecret(ctx, secret, crt)
+		if err != nil {
+			return err
+		}
 	}
 
 	// secret will be overwritten by 'existingSecret' if existingSecret is non-nil
@@ -112,6 +119,44 @@ func (s *SecretsManager) UpdateData(ctx context.Context, crt *cmapi.Certificate,
 
 	// Currently we are always updating. We should devise a way to not have to call an update if it is not necessary.
 	_, err = s.kubeClient.CoreV1().Secrets(secret.Namespace).Update(ctx, secret, metav1.UpdateOptions{})
+	return err
+}
+
+func (s *SecretsManager) backupSecret(ctx context.Context, secret *corev1.Secret, crt *cmapi.Certificate) error {
+	// backup := secret.DeepCopy()
+	// backup.ObjectMeta.SetName(secret.ObjectMeta.Name + "-backup" + time.Now().Format("20060102150405"))
+	// delete(backup.ObjectMeta, s.kubeClient.CoreV1().Secrets.ObjectMeta.)
+	backupName := secret.ObjectMeta.Name + "-backup" + time.Now().Format("20060102150405")
+	backup, err := s.secretLister.Secrets(secret.Namespace).Get(backupName)
+	if !apierrors.IsNotFound(err) && err != nil {
+		// If secret doesn't exist yet, then don't error
+		return err
+	}
+	backupExists := (backup != nil)
+
+	backup = &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      backupName,
+			Namespace: secret.Namespace,
+		},
+		Type: corev1.SecretTypeTLS,
+	}
+
+	backup.Data = secret.Data
+	backup.Annotations = secret.Annotations
+
+	if s.enableSecretOwnerReferences {
+		backup.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(crt, certificateGvk)}
+	}
+
+	// If secret does not exist then create it
+	if !backupExists {
+		_, err = s.kubeClient.CoreV1().Secrets(secret.Namespace).Create(ctx, backup, metav1.CreateOptions{})
+		return err
+	}
+
+	// Currently we are always updating. We should devise a way to not have to call an update if it is not necessary.
+	_, err = s.kubeClient.CoreV1().Secrets(secret.Namespace).Update(ctx, backup, metav1.UpdateOptions{})
 	return err
 }
 
